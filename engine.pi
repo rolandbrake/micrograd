@@ -1,0 +1,244 @@
+import lang
+import col.{reverse}
+
+
+
+
+/*
+ * Value represents a scalar value in a computational graph.
+ *
+ * Each Value stores:
+ * - data: the actual numeric value
+ * - grad: gradient of some final output with respect to this value
+ * - prev: input nodes that were used to create this value 
+ * - op: operation that produced this value (useful for debugging/visualization)
+ * - _backward: function that propagates gradients to input nodes
+ */
+class Value  {
+
+    // Create a new scalar node in the computation graph.
+    constructor(data, prev= (), op='') {
+        this.data = data
+
+        // Gradient is initialized to zero and populated during backpropagation.
+        this.grad = 0
+
+        // Function that computes local gradients.
+        // It will be replaced by each operation (+, *, etc.).
+        this._backward = () -> nil
+
+        // Store preceding input nodes so we can traverse the graph later.
+        this._prev = prev
+
+        // Name of the operation that produced this node.
+        this._op = op
+    }
+
+    /*
+     * Generic operation dispatcher.
+     *
+     * Depending on the requested operator, creates a new Value node
+     * and attaches the appropriate backward function.
+     */
+    compute(op, other) {
+        let out, _backward
+
+
+        // Addition
+        // z = x + y
+        //
+        // dz/dx = 1
+        // dz/dy = 1
+
+        if op == lang.OP_ADD {                        
+            other = other is Value ? other : Value(other)            
+            
+
+            out = Value(this.data + other.data, (this, other), '+')
+
+            _backward = () -> {
+                this.grad += out.grad
+                other.grad += out.grad
+            }
+
+            out._backward = _backward
+            return out
+        }
+
+
+        // Subtraction
+        // z = x - y
+        //
+        // dz/dx = 1
+        // dz/dy = -1
+
+        else if op == lang.OP_SUB {
+            other = other is Value ? other : Value(other)
+
+            out = Value(this.data - other.data, (this, other), '-')
+
+            _backward = () -> {
+                this.grad += out.grad
+                other.grad += -1 * out.grad
+            }
+
+            out._backward = _backward
+            return out
+        }
+
+
+        // Multiplication
+        // z = x * y
+        //
+        // dz/dx = y
+        // dz/dy = x
+
+        else if op == lang.OP_MUL {
+            other = other is Value ? other : Value(other)
+
+            out = Value(this.data * other.data, (this, other), '*')
+
+            _backward = () -> {
+                this.grad += other.data * out.grad
+                other.grad += this.data * out.grad
+            }
+
+            out._backward = _backward
+            return out
+        }
+
+
+        // Power
+        // z = x^n
+        //
+        // dz/dx = n * x^(n-1)
+        //
+        // Only scalar exponents are currently supported.
+
+        else if op == lang.OP_POW {
+            // PiLang literals are accepted directly as numeric exponents.
+            // Their concrete scalar type is handled by the VM.
+
+            out = Value(this.data**other, (this,), '**' + other)
+
+            _backward = () -> {
+                this.grad +=
+                    (other * this.data**(other-1)) * out.grad
+            }
+
+            out._backward = _backward
+            return out
+        }
+
+
+        // Negation
+        // z = -x
+        //
+        // dz/dx = -1
+
+        else if op == lang.OP_NEG {
+            out = Value(-this.data, (this,), '-')
+
+            _backward = () -> {
+                this.grad += -1 * out.grad
+            }
+
+            out._backward = _backward
+            return out
+        }
+    }
+    
+
+    /*
+     * ReLU activation function.
+     *
+     * ReLU(x) = max(0, x)
+     *
+     * Derivative:
+     *   1 if x > 0
+     *   0 otherwise
+     */
+    relu() {
+        let out = Value(
+            this.data < 0 ? 0 : this.data,
+            (this,),
+            'ReLU'
+        )
+
+        let _backward = () -> {
+            this.grad += (out.data > 0) * out.grad
+        }
+
+        out._backward = _backward
+
+        return out
+    }
+
+    /*
+     * Perform reverse-mode automatic differentiation.
+     *
+     * Steps:
+     * 1. Build a topological ordering of the graph.
+     * 2. Seed the output gradient with 1.
+     * 3. Traverse nodes in reverse topological order.
+     * 4. Apply each node's local backward function.
+     */
+    backward() {
+
+        // Topological ordering of graph nodes.
+        let topo = []
+
+        // Track visited nodes by the VM's object identity.
+        let visited = {}
+
+        fun build_topo(v) {
+            let key = v.hash()
+
+            if !(key in visited) {
+                visited[key] = true
+
+                for parent in v._prev
+                    build_topo(parent)
+
+                push(topo, v)
+            }
+        }
+
+        build_topo(this)
+
+        /*
+         * Seed gradient of final output.
+         *
+         * If y is the output:
+         * dy/dy = 1
+         */
+        this.grad = 1
+
+        /*
+         * Walk backward through the graph.
+         *
+         * Reverse order guarantees that every node's gradient
+         * is available before propagating it to its input nodes.
+         */
+        for v in reverse(topo)
+            if v._backward != nil
+                v._backward()
+
+        // Once gradients are propagated, the forward graph is no longer
+        // needed for this training step. Drop graph edges and closure captures
+        // so large models do not retain the full autograd tape.
+        for v in topo {
+            v._prev = ()
+            v._backward = nil
+        }
+    }
+
+    /*
+     * String representation for debugging.
+     */
+    format() {
+        return "Value(data=" + this.data +
+               ", grad=" + this.grad + " )"
+    }
+
+}
